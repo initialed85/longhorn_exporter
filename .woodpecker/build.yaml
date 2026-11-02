@@ -1,0 +1,65 @@
+# Build, publish, and deploy longhorn-exporter (home-dev, namespace `observability`).
+#
+# `exporter.py` is a single-file Python exporter and `docker/Dockerfile` copies it into
+# python:3.13-slim, so there is nothing to compile: the gate is a syntax check plus the image build.
+# There is no test suite yet, so `py_compile` is the only thing standing between a typo and a
+# CrashLooping DaemonSet - if you add tests, put them in this step (they run in the same image family
+# as the runtime, `docker.io/library/python:3.13-slim`).
+#
+# The deploy step writes into the shared `observability/kustomization.yaml` (see strata_exporter's
+# build.yaml for why two pipelines can stamp one file safely).
+steps:
+  - name: test
+    image: docker.io/library/python:3.13-slim
+    commands:
+      - python3 --version
+      - python3 -m py_compile exporter.py
+      - python3 -c 'import ast,sys; ast.parse(open("exporter.py").read()); print("exporter.py parses")'
+
+  - name: build-and-push
+    image: docker.io/library/docker:cli
+    privileged: true
+    depends_on: [test]
+    environment:
+      DOCKER_HOST: tcp://docker-beefcake-ci-1:2375
+      IMAGE: docker.io/initialed85/longhorn-exporter
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: dockerhub
+            key: username
+            target:
+              env: DOCKERHUB_USER
+          - name: dockerhub
+            key: token
+            target:
+              env: DOCKERHUB_TOKEN
+    commands:
+      - docker info --format 'daemon={{.Name}}'
+      - echo "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USER" --password-stdin
+      - docker build --pull --progress=plain --platform=linux/amd64 -f docker/Dockerfile -t "$IMAGE:$CI_COMMIT_SHA" -t "$IMAGE:latest" .
+      - docker push "$IMAGE:$CI_COMMIT_SHA"
+      - docker push "$IMAGE:latest"
+      - docker inspect --format 'digests={{.RepoDigests}}' "$IMAGE:$CI_COMMIT_SHA"
+
+  - name: deploy-home-ops
+    image: docker.io/initialed85/wp-kustomize-deploy:latest
+    depends_on: [build-and-push]
+    settings:
+      image: docker.io/initialed85/longhorn-exporter
+      dir: clusters/dev/applications/observability
+    backend_options:
+      kubernetes:
+        secrets:
+          - name: home-ops-deploy-key
+            key: id_ed25519
+            target:
+              env: PLUGIN_DEPLOY_KEY
+          - name: home-ops-deploy-key
+            key: known_hosts
+            target:
+              env: PLUGIN_KNOWN_HOSTS
+
+when:
+  - event: push
+    branch: master
