@@ -94,4 +94,35 @@ Both clusters scrape it: `clusters/dev/applications/observability/` (where the C
 the commit-sha tag into `kustomization.yaml`) and `clusters/prod/applications/observability/`
 (plain manifests, so prod tracks `:latest` and only picks a new build up when the pod restarts).
 
+## Why every collector calls `clear()`
+
+`prometheus_client` keeps one child per label set for the life of the process. A volume that
+leaves the API (deleted, or restored then renamed) or changes a label value (`state="attached"`
+-> `state="detached"`) therefore keeps exporting its last value forever, and these pods live for
+weeks.
+
+Symptom, from the incident that started this: `longhorn_volume_size_bytes{name="pvc-276c1d9a..."}`
+reporting a volume that no longer exists, and one volume appearing twice in `longhorn_volume_info`
+with both its old and its new state — so every grouped panel counts it twice. Restarting the pod was
+the only way to clear the rows, and the fleet runs `:latest` and restarts rarely. Each collector now
+clears its own gauges before repopulating them.
+
+This is also the reason the tests here are differential. The fix was written once into a copy of
+this exporter that lived in `home-ops`, the image kept being built from this repo, and the pipeline
+published the unfixed source over the fixed one — silently, because the only gate was `py_compile`
+and the metrics were wrong rather than broken. `py_compile` cannot notice a class of wrong output.
+
+## Deploy gotcha
+
+`clusters/dev/applications/observability/` is kustomized and the CI deploy step stamps the commit-sha
+tag into its `kustomization.yaml`, so dev follows builds automatically.
+`clusters/prod/applications/observability/` is plain manifests on `:latest`, and Argo does not roll a
+pod for an image push (no manifest change), so prod only picks a new build up when the pod restarts:
+
+```sh
+kubectl --context home-prod -n observability delete pod -l app.kubernetes.io/name=longhorn-exporter
+```
+
+Confirm with `.status.containerStatuses[].imageID`.
+
 No license.
