@@ -1,20 +1,29 @@
 # Build, publish, and deploy longhorn-exporter (home-dev, namespace `observability`).
 #
 # `exporter.py` is a single-file Python exporter and `docker/Dockerfile` copies it into
-# python:3.13-slim, so there is nothing to compile: the gate is a syntax check plus the image build.
-# There is no test suite yet, so `py_compile` is the only thing standing between a typo and a
-# CrashLooping DaemonSet - if you add tests, put them in this step (they run in the same image family
-# as the runtime, `docker.io/library/python:3.13-slim`).
+# python:3.13-slim-trixie, so there is nothing to compile. The gate is the test suite:
+# `test_exporter.py` reproduces the stale-series bug in-process (a deleted volume, a changed
+# label value) with the API replaced by a fake, so it needs no cluster, no docker and no
+# network -- and it fails against the pre-fix exporter.py, which is what makes it a
+# regression gate rather than a description of whatever the file currently does.
+#
+# This lane is why the fix was lost once already: the exporter was fixed in home-ops, the
+# image kept being published from here, and `py_compile` was the only check -- a typo check
+# cannot notice that a whole class of wrong output is being shipped.
 #
 # The deploy step writes into the shared `observability/kustomization.yaml` (see strata_exporter's
 # build.yaml for why two pipelines can stamp one file safely).
 steps:
   - name: test
-    image: docker.io/library/python:3.13-slim
+    image: docker.io/library/python:3.13-slim-trixie
     commands:
       - python3 --version
-      - python3 -m py_compile exporter.py
+      - python3 -m py_compile exporter.py test_exporter.py
       - python3 -c 'import ast,sys; ast.parse(open("exporter.py").read()); print("exporter.py parses")'
+      # Same pins as docker/Dockerfile: a test that resolves different dependency versions
+      # than the image it is guarding is testing a different program.
+      - pip install --no-cache-dir --root-user-action=ignore prometheus_client==0.26.0 requests==2.34.2
+      - python3 -m unittest -v test_exporter
 
   - name: build-and-push
     image: docker.io/library/docker:cli

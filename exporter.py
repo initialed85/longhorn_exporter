@@ -65,7 +65,22 @@ def conditions(obj):
     return {c.get("type"): c.get("status") for c in raw}
 
 
+def clear(*gauges):
+    """Drop every label set of these gauges before the scrape repopulates them.
+
+    prometheus_client keeps a child per label set for the life of the process, so a
+    volume that leaves the API (deleted, restored then renamed) or changes a label value
+    (state attached -> detached) keeps exporting its last value forever. Restarting the
+    pod was the only way to clear those rows; the fleet runs on :latest and restarts
+    rarely, so each collector clears its own gauges first.
+    """
+    for gauge in gauges:
+        gauge.clear()
+
+
 def volumes():
+    clear(V_INFO, V_SIZE, V_ROBUSTNESS, V_READY, V_REPLICAS, V_UNHEALTHY, V_CONDITION,
+          V_PURGING, V_LAST_BACKUP, V_RESTORING, V_EXPANDING)
     for v in get("volumes"):
         name = v["name"]
         robustness = v.get("robustness", "")
@@ -88,6 +103,9 @@ def volumes():
 
 
 def nodes():
+    clear(N_READY, N_SCHEDULABLE, N_ALLOW_SCHEDULING, N_EVICTING, N_CONDITION,
+          N_RESERVED, N_SCHEDULED, N_AVAILABLE, N_MAXIMUM,
+          D_SIZE, D_AVAILABLE, D_RESERVED, D_SCHEDULED, D_SCHEDULABLE, D_READY, D_REPLICAS)
     for n in get("nodes"):
         name = n["name"]
         conds = conditions(n)
@@ -118,6 +136,7 @@ def nodes():
 
 
 def backupvolumes():
+    clear(B_AVAILABLE, B_STARTING, B_RESTORING)
     for b in get("backupvolumes"):
         last = max((e.get("name", "") for e in (b.get("lastBackup") or [])), default="")
         B_AVAILABLE.labels(b["name"], last).set(1 if b.get("available") else 0)
@@ -126,16 +145,19 @@ def backupvolumes():
 
 
 def backuptargets():
+    clear(BT_INFO)
     for t in get("backuptargets"):
         BT_INFO.labels(t["name"], t.get("url", ""), t.get("status", "")).set(1)
 
 
 def systembackups():
+    clear(SB_INFO)
     for s in get("systembackups"):
         SB_INFO.labels(s["name"], s.get("state", "")).set(1)
 
 
 def orphans():
+    clear(ORPHAN_COUNT)
     counts = {}
     for o in get("orphans"):
         counts[(o.get("nodeID", ""), o.get("type", ""))] = counts.get((o.get("nodeID", ""), o.get("type", "")), 0) + 1
@@ -175,3 +197,4 @@ if __name__ == "__main__":
     httpd, _ = start_http_server(port)
     print(f"longhorn-exporter :{port} api={API}")
     httpd.serve_forever()
+

@@ -45,8 +45,33 @@ Exporter: `longhorn_exporter_endpoint_up`, `longhorn_exporter_scrape_duration_se
 ./build-tag-and-push.sh          # sets DOCKER_HOST if you build against a remote daemon
 ```
 
-Produces `initialed85/longhorn-exporter:latest` (`linux/amd64`, Python 3.13 slim, `requests` +
-`prometheus_client`).
+Produces `initialed85/longhorn-exporter:latest` (`linux/amd64`, `python:3.13-slim-trixie`, pinned
+`requests` + `prometheus_client`). CI publishes the same image on every push to `main` via
+`.woodpecker/build.yaml`, tagged with the commit sha as well as `latest`.
+
+## Test
+
+Two halves, because this exporter has bitten the fleet once already by shipping metrics that were
+stale rather than wrong.
+
+```sh
+python3 -m unittest test_exporter   # fast, no docker, runs in CI
+./acceptance-test.sh                # heavier, local only: real containers
+```
+
+`test_exporter.py` replaces `exporter.get` with a fake and reproduces the bug in-process: two
+volumes, a scrape, then one deleted and one flipped `attached/healthy` -> `detached/unknown`. It
+asserts the survivor exports exactly one `longhorn_volume_info` series and the deleted volume
+exports none. Run it against the pre-fix `exporter.py` and four of the five tests fail — it is a
+regression gate, not a description of current behaviour.
+
+`acceptance-test.sh` builds this source into a container, runs it next to a pinned **pre-fix
+registry digest** against a mock Longhorn API, and requires the old digest to leak (9 series for a
+deleted volume) and the new build to clear (0). The old digest is pinned rather than `:latest`
+because `:latest` is the thing that regressed: a test that flips its own expectation once a good
+build lands is not a test. It cannot run in the Kubernetes backend — `docker run -p` publishes on
+the daemon host, and the CI step would then curl its own `127.0.0.1` — which is why the CI gate is
+the unit test.
 
 ## Deploy
 
@@ -62,7 +87,11 @@ spec:
               containerPort: 9572
 ```
 
-The image's `CMD` is `python /srv/exporter.py`; set `LONGHORN_API` if Longhorn is not in the same
-cluster. The exporter only issues `GET` requests; it cannot mutate Longhorn state.
+The image's `ENTRYPOINT` is `python /srv/exporter.py`; set `LONGHORN_API` if Longhorn is not in the
+same cluster. The exporter only issues `GET` requests; it cannot mutate Longhorn state.
+
+Both clusters scrape it: `clusters/dev/applications/observability/` (where the CI deploy step stamps
+the commit-sha tag into `kustomization.yaml`) and `clusters/prod/applications/observability/`
+(plain manifests, so prod tracks `:latest` and only picks a new build up when the pod restarts).
 
 No license.
